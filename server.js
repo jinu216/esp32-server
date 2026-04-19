@@ -1,86 +1,144 @@
 const express = require("express");
-const app = express();
+const http = require("http");
+const { Server } = require("socket.io");
 
-// ================= MIDDLEWARE =================
+const app = express();
 app.use(express.json());
 
-// CORS FIX (VERY IMPORTANT for HTML)
-app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Headers", "*");
-    res.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
-    next();
+// ================= HTTP + WS SERVER =================
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: { origin: "*" }
 });
 
 // ================= STORAGE =================
 let latestData = {};
 let calibrationData = {};
+let calibrationLogs = [];
 let logs = [];
 
-// ================= HEALTH CHECK (IMPORTANT FOR HTML) =================
-app.get("/health", (req, res) => {
-    res.json({
-        status: "OK",
-        time: Date.now()
-    });
-});
+let lastSeen = null;
+let espStartTime = null;
 
 // ================= HOME =================
 app.get("/", (req, res) => {
-    res.send("ESP32 Server Running 🚀");
+    res.send("ESP32 Server Running with WebSocket 🚀");
 });
 
-// ================= RECEIVE DATA FROM ESP32 =================
+// ================= HEALTH =================
+app.get("/health", (req, res) => {
+    res.send("OK");
+});
+
+// ================= RECEIVE DATA =================
 app.post("/data", (req, res) => {
     const data = req.body;
 
     console.log("Incoming Data:", data);
 
-    // Always store latest live data
+    // ================= ESP STATUS TRACK =================
+    lastSeen = Date.now();
+
+    if (!espStartTime) {
+        espStartTime = Date.now();
+    }
+
+    // ================= LIVE DATA =================
     if (data.type === "LIVE") {
-        latestData = data;
+        latestData = {
+            ...data,
+            received_at: new Date().toISOString()
+        };
+
+        // PUSH TO ALL CLIENTS (REAL TIME)
+        io.emit("live", latestData);
     }
 
-    // Store calibration
+    // ================= CALIBRATION =================
     if (data.type === "CALIBRATION") {
-        calibrationData = data;
+        const cal = {
+            ...data,
+            received_at: new Date().toISOString()
+        };
+
+        calibrationData = cal;
+        calibrationLogs.push(cal);
+
+        io.emit("calibration", cal);
     }
 
-    // Store logs
+    // ================= LOG STORAGE =================
     logs.push({
         ...data,
-        timestamp: Date.now()
+        received_at: new Date().toISOString()
     });
 
     if (logs.length > 200) logs.shift();
 
+    io.emit("log", data);
+
     res.status(200).send("OK");
 });
 
-// ================= GET LIVE DATA =================
+// ================= LIVE DATA =================
 app.get("/live", (req, res) => {
-    res.json(latestData || {});
+    res.json(latestData);
 });
 
-// ================= GET CALIBRATION =================
+// ================= CALIBRATION =================
 app.get("/calibration", (req, res) => {
-    res.json(calibrationData || {});
+    res.json(calibrationData);
 });
 
-// ================= GET LOGS =================
+// ================= CALIBRATION LOGS =================
+app.get("/calibration_logs", (req, res) => {
+    res.json(calibrationLogs);
+});
+
+// ================= LOGS =================
 app.get("/logs", (req, res) => {
-    res.json(logs || []);
+    res.json(logs);
 });
 
-// ================= DELETE ALL LOGS =================
-app.delete("/delete_all", (req, res) => {
-    logs = [];
-    res.json({ message: "All logs deleted" });
+// ================= ESP STATUS =================
+app.get("/status", (req, res) => {
+    const now = Date.now();
+    const isOnline = lastSeen && (now - lastSeen < 3000);
+
+    res.json({
+        status: isOnline ? "ON" : "OFF",
+        lastSeen
+    });
+});
+
+// ================= UPTIME =================
+app.get("/uptime", (req, res) => {
+    if (!espStartTime) {
+        return res.json({ uptime_sec: 0 });
+    }
+
+    res.json({
+        uptime_sec: Math.floor((Date.now() - espStartTime) / 1000)
+    });
+});
+
+// ================= SOCKET CONNECTION =================
+io.on("connection", (socket) => {
+    console.log("Client connected 🔌");
+
+    // send latest state instantly
+    socket.emit("live", latestData);
+    socket.emit("calibration", calibrationData);
+    socket.emit("log", logs.slice(-20));
+
+    socket.on("disconnect", () => {
+        console.log("Client disconnected ❌");
+    });
 });
 
 // ================= START SERVER =================
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log("Server running on port", PORT);
 });
