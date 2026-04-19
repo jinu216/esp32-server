@@ -3,22 +3,54 @@ const app = express();
 
 app.use(express.json());
 
-// Test route
+// ================= STORAGE =================
+let latestData = {};
+let calibrationData = {};
+let logs = [];
+
+// ================= HOME =================
 app.get("/", (req, res) => {
-  res.send("Server is LIVE 🚀");
+    res.send("ESP32 Server Running");
 });
 
-// Receive ESP32 data
+// ================= RECEIVE DATA =================
 app.post("/data", (req, res) => {
-  const data = req.body;
+    const data = req.body;
 
-  console.log("Incoming Data:");
-  console.log(data);
+    console.log("Incoming Data:", data);
 
-  res.json({ status: "OK" });
+    if (data.type === "CALIBRATION") {
+        calibrationData = data;
+    }
+
+    if (data.type === "LIVE") {
+        latestData = data;
+    }
+
+    logs.push(data);
+    if (logs.length > 100) logs.shift();
+
+    res.status(200).send("OK");
 });
 
+// ================= GET LIVE =================
+app.get("/live", (req, res) => {
+    res.json(latestData);
+});
+
+// ================= GET CALIBRATION =================
+app.get("/calibration", (req, res) => {
+    res.json(calibrationData);
+});
+
+// ================= GET LOGS =================
+app.get("/logs", (req, res) => {
+    res.json(logs);
+});
+
+// ================= START SERVER =================
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+    console.log("Server running on port", PORT);
 });
