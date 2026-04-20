@@ -1,130 +1,134 @@
 const express = require("express");
-const cors = require("cors");
-const mongoose = require("mongoose");
 const http = require("http");
-const { Server } = require("socket.io");
+const mongoose = require("mongoose");
+const WebSocket = require("ws");
+const cors = require("cors");
+const fetch = require("node-fetch");
 
 const app = express();
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
-// ================= SERVER =================
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*" }
+const wss = new WebSocket.Server({ server });
+
+// ================= MONGO =================
+mongoose.connect("mongodb+srv://Safepark:Danlesco%40123@safepark.ad1to8r.mongodb.net/?appName=Safepark", {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
 });
-
-const PORT = process.env.PORT || 10000;
-
-// ================= MONGODB =================
-// 👉 Replace with your MongoDB Atlas URL
-const MONGO_URL = "mongodb+srv://Safepark:Danlesco%40123@safepark.ad1to8r.mongodb.net/?appName=Safepark";
-
-mongoose.connect(MONGO_URL)
-.then(() => console.log("MongoDB Connected ✅"))
-.catch(err => console.log(err));
 
 // ================= SCHEMA =================
-const LogSchema = new mongoose.Schema({
-    device_id: String,
-    node_id: Number,
-    type: String,
-    x: Number,
-    y: Number,
-    z: Number,
-    magnitude: Number,
-    event: Number,
-    baseline: Number,
-    noise: Number,
-    scratch_th: Number,
-    hit_th: Number,
-    timestamp: Number,
-    createdAt: { type: Date, default: Date.now }
+const Schema = new mongoose.Schema({
+  device_id: String,
+  node_id: Number,
+  type: String,
+  x: Number,
+  y: Number,
+  z: Number,
+  magnitude: Number,
+  event: Number,
+  baseline: Number,
+  noise: Number,
+  scratch_th: Number,
+  hit_th: Number,
+  timestamp: Number,
+  createdAt: { type: Date, default: Date.now }
 });
 
-const Log = mongoose.model("Log", LogSchema);
+const Data = mongoose.model("Data", Schema);
 
-// ================= MEMORY CACHE =================
-let latestData = {};
-let calibrationData = {};
-let lastSeen = Date.now();
+// ================= MEMORY =================
+let latest = {};
+let clients = [];
+
+// heartbeat tracking
+let lastSeen = {};
+
+// ================= TELEGRAM (OPTIONAL) =================
+const BOT_TOKEN = "8741173186:AAFiIr_79RfxZLZptsb5w2H9TT1qsLzCBzQ";
+const CHAT_ID = "8214757159";
+
+async function sendAlert(msg){
+  try{
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        chat_id:CHAT_ID,
+        text:msg
+      })
+    });
+  }catch(e){}
+}
+
+// ================= WS =================
+wss.on("connection",(ws)=>{
+  clients.push(ws);
+
+  ws.on("close",()=>{
+    clients = clients.filter(c=>c!==ws);
+  });
+});
+
+function broadcast(data){
+  clients.forEach(c=>{
+    if(c.readyState===1)
+      c.send(JSON.stringify(data));
+  });
+}
 
 // ================= HEALTH =================
-app.get("/health", (req, res) => {
-    let diff = Date.now() - lastSeen;
-
-    if (diff > 3000) {
-        return res.send("ESP32 OFFLINE ❌");
-    }
-
-    res.send("Server OK ✅");
+app.get("/health",(req,res)=>{
+  res.send("Server OK 🚀");
 });
 
-// ================= RECEIVE DATA =================
-app.post("/data", async (req, res) => {
-
-    const data = req.body;
-    lastSeen = Date.now();
-
-    console.log("Incoming:", data);
-
-    // ================= TYPE HANDLING =================
-    if (data.type === "LIVE") {
-        latestData = data;
-    }
-
-    if (data.type === "CALIBRATION") {
-        calibrationData = data;
-    }
-
-    // Save ALL to MongoDB
-    try {
-        await Log.create(data);
-    } catch (err) {
-        console.log("DB Error:", err);
-    }
-
-    // ================= WEBSOCKET PUSH =================
-    io.emit("live", latestData);
-    io.emit("calibration", calibrationData);
-    io.emit("log", data);
-
-    res.send({ status: "OK" });
+// ================= LIVE =================
+app.get("/live",(req,res)=>{
+  res.json(latest);
 });
 
-// ================= API ENDPOINTS =================
-app.get("/live", (req, res) => {
-    res.json(latestData);
+// ================= LOGS =================
+app.get("/logs",async(req,res)=>{
+  const data = await Data.find().sort({createdAt:-1}).limit(100);
+  res.json(data);
 });
 
-app.get("/calibration", (req, res) => {
-    res.json(calibrationData);
+// ================= DATA =================
+app.post("/data",async(req,res)=>{
+
+  const d = req.body;
+  d.timestamp = Date.now();
+
+  latest = d;
+
+  lastSeen[d.device_id] = Date.now();
+
+  await Data.create(d);
+
+  broadcast(d);
+
+  // HIT ALERT
+  if(d.event === 2){
+    sendAlert(`🚨 HIT DETECTED on ${d.device_id}`);
+  }
+
+  res.send("OK");
 });
 
-app.get("/logs", async (req, res) => {
-    const logs = await Log.find().sort({ _id: -1 }).limit(50);
-    res.json(logs);
-});
+// ================= DEVICE STATUS =================
+app.get("/status",(req,res)=>{
+  let now = Date.now();
+  let status = {};
 
-// ================= ROOT =================
-app.get("/", (req, res) => {
-    res.send("SafePark Server Running 🚀");
-});
+  for(let k in lastSeen){
+    status[k] = (now - lastSeen[k]) < 3000 ? "ONLINE" : "OFFLINE";
+  }
 
-// ================= SOCKET =================
-io.on("connection", (socket) => {
-    console.log("Client Connected 🔌");
-
-    // send initial data
-    socket.emit("live", latestData);
-    socket.emit("calibration", calibrationData);
-
-    socket.on("disconnect", () => {
-        console.log("Client Disconnected ❌");
-    });
+  res.json(status);
 });
 
 // ================= START =================
-server.listen(PORT, () => {
-    console.log("Server running on port", PORT);
+server.listen(10000,()=>{
+  console.log("SafePark Server Running 🚀");
 });
