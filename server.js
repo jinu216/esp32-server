@@ -12,11 +12,13 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 // ================= MONGO =================
-mongoose.connect("mongodb+srv://Safepark:Danlesco%40123@safepark.ad1to8r.mongodb.net/?retryWrites=true&w=majority")
-  .then(() => console.log("MongoDB Connected 🚀"))
-  .catch(err => console.log("Mongo Error:", err));
+mongoose.connect(
+  "mongodb+srv://Safepark:Danlesco%40123@safepark.ad1to8r.mongodb.net/?retryWrites=true&w=majority"
+)
+.then(() => console.log("MongoDB Connected 🚀"))
+.catch(err => console.log("Mongo Error:", err));
 
-// ================= SCHEMA =================
+// ================= SCHEMA (EXISTING SENSOR DATA) =================
 const Schema = new mongoose.Schema({
   device_id: String,
   node_id: Number,
@@ -36,30 +38,22 @@ const Schema = new mongoose.Schema({
 
 const Data = mongoose.model("Data", Schema);
 
+// ================= NEW SCHEMA (MOTION + VIDEO EVENTS) =================
+const MotionSchema = new mongoose.Schema({
+  device: String,
+  event: String,
+  time: Date,
+  status: String,
+  videoFile: String,
+  createdAt: { type: Date, default: Date.now }
+});
+
+const MotionEvent = mongoose.model("MotionEvent", MotionSchema);
+
 // ================= MEMORY =================
 let latest = {};
 let clients = [];
 let lastSeen = {};
-
-// ================= TELEGRAM =================
-const BOT_TOKEN = "YOUR_BOT_TOKEN";
-const CHAT_ID = "YOUR_CHAT_ID";
-
-// FIX: native fetch safe for Node 22
-async function sendAlert(msg){
-  try{
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text: msg
-      })
-    });
-  }catch(e){
-    console.log("Telegram Error:", e.message);
-  }
-}
 
 // ================= WEBSOCKET =================
 wss.on("connection", (ws) => {
@@ -78,15 +72,17 @@ function broadcast(data){
   });
 }
 
-// ================= ROUTES =================
+// ================= HEALTH =================
 app.get("/health", (req, res) => {
   res.send("Server OK 🚀");
 });
 
+// ================= LIVE =================
 app.get("/live", (req, res) => {
   res.json(latest);
 });
 
+// ================= LOGS =================
 app.get("/logs", async (req, res) => {
   try {
     const data = await Data.find().sort({ createdAt: -1 }).limit(100);
@@ -96,7 +92,24 @@ app.get("/logs", async (req, res) => {
   }
 });
 
-// ================= DATA RECEIVE =================
+// ================= STATUS =================
+app.get("/status", (req, res) => {
+  let now = Date.now();
+  let status = {};
+
+  for (let d in lastSeen) {
+    let diff = now - lastSeen[d];
+
+    status[d] =
+      diff < 3000 ? "ONLINE" :
+      diff < 5000 ? "WARNING" :
+      "OFFLINE";
+  }
+
+  res.json(status);
+});
+
+// ================= SENSOR DATA INPUT (EXISTING) =================
 app.post("/data", async (req, res) => {
   try {
     const d = req.body;
@@ -110,30 +123,71 @@ app.post("/data", async (req, res) => {
     broadcast(d);
 
     if (d.event === 2) {
-      sendAlert(`🚨 HIT DETECTED on ${d.device_id}`);
+      console.log("🚨 HIT DETECTED");
     }
 
     res.send("OK");
   } catch (e) {
-    console.log("POST error:", e);
+    console.log(e);
     res.status(500).send("Error");
   }
 });
 
-// ================= DEVICE STATUS =================
-app.get("/status", (req, res) => {
-  let now = Date.now();
-  let status = {};
 
-  for (let k in lastSeen) {
-    status[k] = (now - lastSeen[k]) < 3000 ? "ONLINE" : "OFFLINE";
+// ================= 🚨 NEW: MOTION EVENT FROM ESP32-CAM =================
+app.post("/motion-event", async (req, res) => {
+  try {
+    const { device } = req.body;
+
+    console.log("🚨 MOTION DETECTED:", device);
+
+    const event = await MotionEvent.create({
+      device,
+      event: "motion_detected",
+      time: new Date(),
+      status: "triggered"
+    });
+
+    // 👉 Trigger external recording system (PC / Raspberry Pi)
+    await fetch("http://YOUR-RECORDER-IP:5001/start-recording", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eventId: event._id })
+    }).catch(err => {
+      console.log("Recorder trigger error:", err.message);
+    });
+
+    res.json({ success: true, eventId: event._id });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).send("Motion Error");
   }
-
-  res.json(status);
 });
 
-// ================= AUTO CLEAN (IMPORTANT) =================
-// remove stale WS connections every 30 sec
+
+// ================= 🎥 NEW: RECORDING DONE CALLBACK =================
+app.post("/recording-done", async (req, res) => {
+  try {
+    const { eventId, file } = req.body;
+
+    await MotionEvent.findByIdAndUpdate(eventId, {
+      status: "recorded",
+      videoFile: file
+    });
+
+    console.log("🎥 Video saved:", file);
+
+    res.json({ ok: true });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).send("Update Error");
+  }
+});
+
+
+// ================= CLEANUP =================
 setInterval(() => {
   clients = clients.filter(c => c.readyState === 1);
 }, 30000);
