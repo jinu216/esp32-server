@@ -5,10 +5,15 @@ const { Server } = require("socket.io");
 const app = express();
 app.use(express.json());
 
-// ================= HTTP + WS SERVER =================
+// ================= CREATE SERVER =================
 const server = http.createServer(app);
+
+// ================= SOCKET.IO =================
 const io = new Server(server, {
-    cors: { origin: "*" }
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
 });
 
 // ================= STORAGE =================
@@ -20,7 +25,7 @@ let logs = [];
 let lastSeen = null;
 let espStartTime = null;
 
-// ================= HOME =================
+// ================= ROOT =================
 app.get("/", (req, res) => {
     res.send("ESP32 Server Running with WebSocket 🚀");
 });
@@ -32,65 +37,70 @@ app.get("/health", (req, res) => {
 
 // ================= RECEIVE DATA =================
 app.post("/data", (req, res) => {
-    const data = req.body;
+    try {
+        const data = req.body;
 
-    console.log("Incoming Data:", data);
+        console.log("Incoming Data:", data);
 
-    // ================= ESP STATUS TRACK =================
-    lastSeen = Date.now();
+        // ===== TRACK ESP32 =====
+        lastSeen = Date.now();
 
-    if (!espStartTime) {
-        espStartTime = Date.now();
-    }
+        if (!espStartTime) {
+            espStartTime = Date.now();
+        }
 
-    // ================= LIVE DATA =================
-    if (data.type === "LIVE") {
-        latestData = {
+        // ===== LIVE DATA =====
+        if (data.type === "LIVE") {
+            latestData = {
+                ...data,
+                received_at: new Date().toISOString()
+            };
+
+            io.emit("live", latestData);
+        }
+
+        // ===== CALIBRATION =====
+        if (data.type === "CALIBRATION") {
+            const cal = {
+                ...data,
+                received_at: new Date().toISOString()
+            };
+
+            calibrationData = cal;
+            calibrationLogs.push(cal);
+
+            io.emit("calibration", cal);
+        }
+
+        // ===== LOGS =====
+        logs.push({
             ...data,
             received_at: new Date().toISOString()
-        };
+        });
 
-        // PUSH TO ALL CLIENTS (REAL TIME)
-        io.emit("live", latestData);
+        if (logs.length > 200) logs.shift();
+
+        io.emit("log", data);
+
+        res.status(200).send("OK");
+
+    } catch (err) {
+        console.error("ERROR:", err);
+        res.status(500).send("Server Error");
     }
-
-    // ================= CALIBRATION =================
-    if (data.type === "CALIBRATION") {
-        const cal = {
-            ...data,
-            received_at: new Date().toISOString()
-        };
-
-        calibrationData = cal;
-        calibrationLogs.push(cal);
-
-        io.emit("calibration", cal);
-    }
-
-    // ================= LOG STORAGE =================
-    logs.push({
-        ...data,
-        received_at: new Date().toISOString()
-    });
-
-    if (logs.length > 200) logs.shift();
-
-    io.emit("log", data);
-
-    res.status(200).send("OK");
 });
 
-// ================= LIVE DATA =================
+// ================= GET LIVE =================
 app.get("/live", (req, res) => {
     res.json(latestData);
 });
 
-// ================= CALIBRATION =================
+// ================= GET CALIBRATION =================
 app.get("/calibration", (req, res) => {
     res.json(calibrationData);
 });
 
-// ================= CALIBRATION LOGS =================
+// ================= CALIBRATION HISTORY =================
 app.get("/calibration_logs", (req, res) => {
     res.json(calibrationLogs);
 });
@@ -100,7 +110,7 @@ app.get("/logs", (req, res) => {
     res.json(logs);
 });
 
-// ================= ESP STATUS =================
+// ================= ESP32 STATUS =================
 app.get("/status", (req, res) => {
     const now = Date.now();
     const isOnline = lastSeen && (now - lastSeen < 3000);
@@ -124,21 +134,21 @@ app.get("/uptime", (req, res) => {
 
 // ================= SOCKET CONNECTION =================
 io.on("connection", (socket) => {
-    console.log("Client connected 🔌");
+    console.log("Client connected");
 
-    // send latest state instantly
+    // Send current data immediately
     socket.emit("live", latestData);
     socket.emit("calibration", calibrationData);
     socket.emit("log", logs.slice(-20));
 
     socket.on("disconnect", () => {
-        console.log("Client disconnected ❌");
+        console.log("Client disconnected");
     });
 });
 
 // ================= START SERVER =================
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 server.listen(PORT, () => {
-    console.log("Server running on port", PORT);
+    console.log(`Server running on port ${PORT}`);
 });
