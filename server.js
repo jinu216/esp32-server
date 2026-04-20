@@ -1,25 +1,41 @@
 const express = require("express");
+const cors = require("cors");
+
 const app = express();
 
+app.use(cors());
 app.use(express.json());
 
-// ================= DATA STORAGE =================
-let latestData = {};
-let calibrationData = {};
-let logs = [];
-let lastUpdateTime = Date.now();
+// ================= GLOBAL STORAGE =================
+let latestData = {
+    device_id: "NO_DATA",
+    x: 0,
+    y: 0,
+    z: 0,
+    magnitude: 0,
+    event: 0,
+    timestamp: 0
+};
+
+let eventLogs = [];
+let calibration = {};
+let lastSeen = Date.now();
 
 // ================= HEALTH CHECK =================
 app.get("/health", (req, res) => {
-    const status = (Date.now() - lastUpdateTime < 5000)
-        ? "Server Online"
-        : "Server Running (No Live Data)";
-    res.send(status);
-});
+    const diff = Date.now() - lastSeen;
 
-// ================= HOME =================
-app.get("/", (req, res) => {
-    res.send("ESP32 Server Running");
+    let status = "ONLINE";
+
+    if (diff > 5000) {
+        status = "ESP32 OFFLINE";
+    }
+
+    res.json({
+        server: "ONLINE",
+        esp32: status,
+        lastSeen: diff + " ms ago"
+    });
 });
 
 // ================= RECEIVE DATA =================
@@ -28,39 +44,49 @@ app.post("/data", (req, res) => {
 
     console.log("Incoming Data:", data);
 
-    lastUpdateTime = Date.now();
+    latestData = {
+        ...data,
+        timestamp: Date.now()
+    };
 
-    if (data.type === "CALIBRATION") {
-        calibrationData = data;
-    }
+    lastSeen = Date.now();
 
+    // store logs only for LIVE
     if (data.type === "LIVE") {
-        latestData = data;
+        eventLogs.push(latestData);
+        if (eventLogs.length > 200) eventLogs.shift();
     }
 
-    logs.push(data);
-    if (logs.length > 100) logs.shift();
+    // calibration store
+    if (data.type === "CALIBRATION") {
+        calibration = data;
+    }
 
-    res.status(200).send("OK");
+    res.json({ status: "OK" });
 });
 
-// ================= LIVE DATA =================
-app.get("/live", (req, res) => {
+// ================= LATEST DATA =================
+app.get("/latest_data", (req, res) => {
     res.json(latestData);
+});
+
+// ================= EVENTS =================
+app.get("/events", (req, res) => {
+    res.json(eventLogs);
 });
 
 // ================= CALIBRATION =================
 app.get("/calibration", (req, res) => {
-    res.json(calibrationData);
+    res.json(calibration);
 });
 
-// ================= LOGS =================
-app.get("/logs", (req, res) => {
-    res.json(logs);
+// ================= ROOT =================
+app.get("/", (req, res) => {
+    res.send("SafePark Server Running 🚀");
 });
 
-// ================= START SERVER =================
-const PORT = process.env.PORT || 3000;
+// ================= START =================
+const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
     console.log("Server running on port", PORT);
