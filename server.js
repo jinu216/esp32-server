@@ -3,7 +3,6 @@ const http = require("http");
 const mongoose = require("mongoose");
 const WebSocket = require("ws");
 const cors = require("cors");
-const fetch = require("node-fetch");
 
 const app = express();
 app.use(express.json());
